@@ -895,20 +895,26 @@ function apiScript(url){
     const script=document.createElement('script');
     const timer=setTimeout(()=>{
       delete window[cbName];
-      document.body.removeChild(script);
+      if(document.body.contains(script))document.body.removeChild(script);
       reject(new Error('Timeout'));
-    },15000);
+    },20000);
     window[cbName]=function(data){
       clearTimeout(timer);
       delete window[cbName];
-      document.body.removeChild(script);
+      if(document.body.contains(script))document.body.removeChild(script);
       resolve(data);
     };
     script.src=url+(url.includes('?')?'&':'?')+'callback='+cbName;
-    script.onerror=()=>{
+    script.onerror=function(){
       clearTimeout(timer);
       delete window[cbName];
-      reject(new Error('Script error'));
+      if(document.body.contains(script))document.body.removeChild(script);
+      // Fallback: intentar con fetch directo
+      fetch(url.split('?')[0],{
+        method:'POST',
+        headers:{'Content-Type':'application/json'},
+        body:JSON.stringify(Object.fromEntries(new URLSearchParams(url.split('?')[1]||'')))
+      }).then(r=>r.json()).then(resolve).catch(()=>reject(new Error('Sin conexion')));
     };
     document.body.appendChild(script);
   });
@@ -918,13 +924,13 @@ async function api(action,data={}){
   setSinc('spin','Guardando...');
   try{
     const params=new URLSearchParams({action,data:JSON.stringify(data)});
-    const json=await apiScript(`${API_URL}?${params}`);
+    const json=await apiScript(API_URL+'?'+params);
     if(!json.ok)throw new Error(json.error||'Error');
     setSinc('ok','Sincronizado');
     return json.data;
   }catch(e){
-    setSinc('err','Error de conexion');
-    console.error(e);
+    setSinc('err','Sin conexion');
+    console.error('[api]',action,e);
     throw e;
   }
 }
