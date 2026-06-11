@@ -4,9 +4,7 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
 <title>Mercería</title>
-<link rel="manifest" href="manifest.json">
 <meta name="theme-color" content="#1a1917">
-<meta name="apple-mobile-web-app-capable" content="yes">
 <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
 <style>
 @import url('https://fonts.googleapis.com/css2?family=DM+Sans:ital,opsz,wght@0,9..40,300;0,9..40,400;0,9..40,500;0,9..40,600;1,9..40,400&family=DM+Mono:wght@400;500&display=swap');
@@ -157,7 +155,8 @@ tr:hover td{background:var(--bg2)}
 #mob-drawer .dni:hover{background:rgba(255,255,255,.1);color:#fff;}
 @media(max-width:768px){.ham-btn{display:flex!important;}}
 </style>
-<script src="https://cdn.sheetjs.com/xlsx-0.20.2/package/dist/xlsx.full.min.js">
+<script src="https://cdn.sheetjs.com/xlsx-0.20.2/package/dist/xlsx.full.min.js"></script>
+<script>
 function toggleMenu(){
   const d=document.getElementById('mob-drawer');
   const o=document.getElementById('mob-overlay');
@@ -172,6 +171,8 @@ function irM(name){cerrarMenu();setTimeout(()=>ir(name),150);}
 
 // ── LEER FACTURA CON IA ──────────────────────────────────────
 let articulosFactura = [];
+let proveedorFactura = 'Factura importada';
+let fechaFactura = '';
 
 async function leerFacturaIA(input) {
   const file = input.files[0];
@@ -195,47 +196,62 @@ async function leerFacturaIA(input) {
     const isPdf = file.type === 'application/pdf';
     const mediaType = isPdf ? 'application/pdf' : file.type;
 
-    const prompt = `Analizá esta factura de una mercería y extraé TODOS los artículos con sus datos.
+    const prompt = `Analizá esta factura de una mercería y extraé los datos del proveedor y TODOS los artículos.
 Devolvé SOLO un JSON válido con este formato exacto, sin texto adicional:
-[
-  {
-    "nombre": "nombre del artículo",
-    "codigo": "código si tiene",
-    "cantidad": número,
-    "costo_unitario": número sin símbolo $,
-    "unidad": "unidad (unidad/metro/rollo/kilo/paquete/docena)",
-    "categoria": "categoría (Hilos/Agujas/Botones/Cintas/Telas/Elásticos/Cierres/Lanas/Fliselina/Medias/Ropa Interior/Accesorios/Insumos/Mercería General)"
-  }
-]
+{
+  "proveedor": "nombre del proveedor o empresa emisora de la factura",
+  "fecha": "fecha de la factura en formato YYYY-MM-DD, o null si no se ve",
+  "articulos": [
+    {
+      "nombre": "nombre del artículo",
+      "codigo": "código si tiene, sino null",
+      "cantidad": número,
+      "costo_unitario": número sin símbolo $,
+      "unidad": "unidad (unidad/metro/rollo/kilo/paquete/docena)",
+      "categoria": "categoría (Hilos/Agujas/Botones/Cintas/Telas/Elásticos/Cierres/Lanas/Fliselina/Medias/Ropa Interior/Accesorios/Insumos/Mercería General)"
+    }
+  ]
+}
 Si un dato no está claro ponelo en null. Solo el JSON, sin markdown ni explicación.`;
 
+    const _rawKey = localStorage.getItem('gemini_key') || '';
+    const GEMINI_KEY = document.getElementById('cfg-gemini-key')?.value?.trim() || (_rawKey ? atob(_rawKey) : '');
+    if (!GEMINI_KEY) {
+      throw new Error('Falta la API Key de Gemini. Configurala desde el botón 🤖 API Key IA en el menú lateral.');
+    }
+
     const body = {
-      model: 'claude-sonnet-4-20250514',
-      max_tokens: 2000,
-      messages: [{
-        role: 'user',
-        content: [
-          {
-            type: isPdf ? 'document' : 'image',
-            source: { type: 'base64', media_type: mediaType, data: b64 }
-          },
-          { type: 'text', text: prompt }
+      contents: [{
+        parts: [
+          { inline_data: { mime_type: mediaType, data: b64 } },
+          { text: prompt }
         ]
-      }]
+      }],
+      generationConfig: { temperature: 0, maxOutputTokens: 2000 }
     };
 
-    const resp = await fetch('https://api.anthropic.com/v1/messages', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(body)
-    });
+    const resp = await fetch(
+      `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key=${GEMINI_KEY}`,
+      { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) }
+    );
 
     const data = await resp.json();
-    const txt = data.content?.map(c => c.text || '').join('').trim();
+    if (data.error) throw new Error(data.error.message);
+    const txt = data.candidates?.[0]?.content?.parts?.map(p => p.text || '').join('').trim();
+    if (!txt) throw new Error('Gemini no devolvió respuesta');
 
     // Parsear JSON
     const clean = txt.replace(/```json|```/g, '').trim();
-    articulosFactura = JSON.parse(clean);
+    const parsed = JSON.parse(clean);
+    if (Array.isArray(parsed)) {
+      articulosFactura = parsed;
+      proveedorFactura = 'Factura importada';
+      fechaFactura = FECHA;
+    } else {
+      articulosFactura = parsed.articulos || [];
+      proveedorFactura = parsed.proveedor || 'Factura importada';
+      fechaFactura = parsed.fecha || FECHA;
+    }
 
     mostrarFacturaResultado();
 
@@ -250,7 +266,20 @@ function mostrarFacturaResultado() {
   document.getElementById('factura-loading').style.display = 'none';
   document.getElementById('factura-resultado').style.display = 'block';
 
-  document.getElementById('factura-items').innerHTML = articulosFactura.map((a, i) => `
+  const encabezado = `
+    <div style="background:var(--green-l);border:1px solid var(--green);border-radius:var(--r);padding:10px 12px;margin-bottom:12px;display:grid;grid-template-columns:1fr 1fr;gap:8px">
+      <div>
+        <label style="font-size:11px;color:var(--green);font-weight:600">PROVEEDOR DETECTADO</label>
+        <input type="text" id="factura-proveedor" value="${proveedorFactura}" onchange="proveedorFactura=this.value" style="width:100%;font-size:13px;padding:4px 6px;border:1px solid var(--green);border-radius:6px;background:#fff;margin-top:3px">
+      </div>
+      <div>
+        <label style="font-size:11px;color:var(--green);font-weight:600">FECHA FACTURA</label>
+        <input type="date" id="factura-fecha" value="${fechaFactura}" onchange="fechaFactura=this.value" style="width:100%;font-size:13px;padding:4px 6px;border:1px solid var(--green);border-radius:6px;background:#fff;margin-top:3px">
+      </div>
+    </div>
+  `;
+
+  document.getElementById('factura-items').innerHTML = encabezado + articulosFactura.map((a, i) => `
     <div style="background:var(--bg2);border-radius:var(--r);padding:12px;margin-bottom:8px;border:1px solid var(--brd)">
       <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px">
         <strong style="font-size:14px">${a.nombre}</strong>
@@ -270,7 +299,7 @@ function mostrarFacturaResultado() {
             ${['unidad','metro','cm','rollo','bobina','paquete','docena','par','cono','kilo','hoja'].map(u=>`<option ${u===a.unidad?'selected':''}>${u}</option>`).join('')}
           </select>
         </div>
-        <div><label style="font-size:11px;color:var(--txt2)">PRECIO VENTA (x${MARGEN})</label><input type="number" value="${a.costo_unitario?+(a.costo_unitario*2.21).toFixed(0):0}" onchange="articulosFactura[${i}].precio_venta=+this.value" style="width:100%;font-size:13px;padding:4px 6px;border:1px solid var(--brd);border-radius:6px;background:var(--bg)"></div>
+        <div><label style="font-size:11px;color:var(--txt2)">PRECIO VENTA (+${Math.round((MARGEN-1)*100)}%)</label><input type="number" value="${a.costo_unitario?+(a.costo_unitario*MARGEN).toFixed(2):0}" onchange="articulosFactura[${i}].precio_venta=+this.value" style="width:100%;font-size:13px;padding:4px 6px;border:1px solid var(--brd);border-radius:6px;background:var(--bg)"></div>
       </div>
     </div>
   `).join('');
@@ -287,47 +316,74 @@ async function cargarFacturaAlStock() {
   btn.textContent = 'Cargando...';
   btn.disabled = true;
 
-  let ok = 0;
+  const proveedor = proveedorFactura || 'Sin especificar';
+  const fecha = fechaFactura || FECHA;
+  let nuevos = 0, actualizados = 0;
+
   for (const a of articulosFactura) {
-    const precioVenta = a.precio_venta || +(a.costo_unitario * 2.21).toFixed(0);
-    // Verificar si ya existe
-    const existe = arts.find(x => x.codigo && x.codigo === a.codigo);
+    const precioVenta = a.precio_venta || +(( a.costo_unitario || 0) * MARGEN).toFixed(2);
+    const cant = a.cantidad || 1;
+    const costo = a.costo_unitario || 0;
+
+    // Buscar artículo existente: primero por código, luego por nombre exacto
+    const existe = arts.find(x =>
+      (a.codigo && x.codigo && x.codigo.trim().toLowerCase() === a.codigo.trim().toLowerCase()) ||
+      (x.nombre.trim().toLowerCase() === (a.nombre||'').trim().toLowerCase())
+    );
+
     if (existe) {
-      // Si existe, cargar como compra (suma stock)
+      // Artículo ya existe → registrar compra (el backend suma el stock)
       await api('saveCompra', {
         articulo_id: existe.id,
         nombre_articulo: existe.nombre,
-        proveedor: 'Factura importada',
-        fecha: FECHA,
-        cantidad: a.cantidad || 1,
-        costo_unitario: a.costo_unitario || 0,
-        total: (a.cantidad || 1) * (a.costo_unitario || 0),
+        proveedor,
+        fecha,
+        cantidad: cant,
+        costo_unitario: costo,
+        total: cant * costo,
         forma_pago: 'contado'
       });
+      actualizados++;
     } else {
-      // Si no existe, crear artículo nuevo
-      await api('saveArticulo', {
+      // Artículo nuevo → crear artículo Y registrar compra
+      const nuevoArt = await api('saveArticulo', {
         nombre: a.nombre,
         categoria: a.categoria || 'Mercería General',
         unidad: a.unidad || 'unidad',
-        costo: a.costo_unitario || 0,
+        costo,
         precio: precioVenta,
-        stock: a.cantidad || 0,
+        stock: cant,
         min_stock: 2,
         codigo: a.codigo || ''
       });
+      // Registrar la compra usando el id devuelto (o buscar por nombre si no viene)
+      const artId = (nuevoArt && nuevoArt.id) ? nuevoArt.id : null;
+      await api('saveCompra', {
+        articulo_id: artId,
+        nombre_articulo: a.nombre,
+        proveedor,
+        fecha,
+        cantidad: cant,
+        costo_unitario: costo,
+        total: cant * costo,
+        forma_pago: 'contado'
+      });
+      nuevos++;
     }
-    ok++;
   }
 
   await cargarTodo();
   rStock();
   document.getElementById('modal-factura').style.display = 'none';
-  alert(`✅ ${ok} artículo${ok>1?'s':''} cargado${ok>1?'s':''} al stock correctamente.`);
+  const msg = [];
+  if (nuevos) msg.push(`${nuevos} artículo${nuevos>1?'s':''} nuevo${nuevos>1?'s':''} creado${nuevos>1?'s':''}`);
+  if (actualizados) msg.push(`${actualizados} artículo${actualizados>1?'s':''} con stock actualizado`);
+  alert(`✅ ${msg.join(' · ')}`);
 }
 
 
 function switchTab(tab){
+  activeStockTab=tab;
   const tabs=['articulos','compras-hist','proveedores'];
   tabs.forEach(t=>{
     const btn=document.getElementById('tab-'+t);
@@ -442,6 +498,8 @@ function rOptStock(){
     <div style="margin-top:16px">
       <label>URL de tu Apps Script (termina en /exec)</label>
       <input id="cfg-url" type="url" placeholder="https://script.google.com/macros/s/XXXXXX/exec" style="margin-bottom:10px;font-family:'DM Mono',monospace;font-size:13px">
+      <label style="margin-top:10px;display:block">API Key de Gemini <small style="color:var(--txt2)">(gratis en <a href="https://aistudio.google.com/apikey" target="_blank">aistudio.google.com</a>)</small></label>
+      <input id="cfg-gemini-key" type="password" placeholder="AIzaSy..." style="margin-bottom:10px;font-family:'DM Mono',monospace;font-size:13px">
       <button class="btn btn-p btn-w btn-lg" onclick="conectar()">Conectar y comenzar →</button>
     </div>
   </div>
@@ -483,6 +541,9 @@ function rOptStock(){
       <div class="ni" onclick="ir('estrategia')"><svg fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.5" d="M13 7h8m0 0v8m0-8l-8 8-4-4-6 6"/></svg>Estrategia</div>
     </div>
     <div style="padding:10px 14px;border-top:1px solid rgba(255,255,255,.08)">
+      <button onclick="abrirConfigGemini()" style="width:100%;padding:8px;border-radius:8px;border:1px solid rgba(255,255,255,0.15);background:rgba(255,255,255,0.07);color:rgba(255,255,255,0.7);font-size:12px;cursor:pointer;font-family:inherit;margin-bottom:8px;display:flex;align-items:center;justify-content:center;gap:5px;transition:background .15s" onmouseover="this.style.background='rgba(255,255,255,0.12)'" onmouseout="this.style.background='rgba(255,255,255,0.07)'">
+        🤖 API Key IA
+      </button>
       <button onclick="document.getElementById('modal-soporte').style.display='flex'" style="width:100%;padding:8px;border-radius:8px;border:1px solid rgba(255,255,255,0.15);background:rgba(255,255,255,0.07);color:rgba(255,255,255,0.7);font-size:12px;cursor:pointer;font-family:inherit;margin-bottom:8px;display:flex;align-items:center;justify-content:center;gap:5px;transition:background .15s" onmouseover="this.style.background='rgba(255,255,255,0.12)'" onmouseout="this.style.background='rgba(255,255,255,0.07)'">
         <svg width="13" height="13" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M18.364 5.636l-3.536 3.536m0 5.656l3.536 3.536M9.172 9.172L5.636 5.636m3.536 9.192l-3.536 3.536M21 12a9 9 0 11-18 0 9 9 0 0118 0zm-5 0a4 4 0 11-8 0 4 4 0 018 0z"/></svg>
         Soporte técnico
@@ -577,6 +638,46 @@ function rOptStock(){
       <div style="font-size:13px;color:var(--txt2)">Historial completo de compras a proveedores</div>
       <button class="btn btn-p" onclick="abrirFC()">+ Nueva compra</button>
     </div>
+    <!-- Formulario de nueva compra -->
+    <div class="card" id="fc" style="display:none;margin-bottom:14px">
+      <div class="ct">Registrar compra</div>
+      <div class="g3">
+        <div class="fr"><label>Fecha</label><input id="c-f" type="date"></div>
+        <div class="fr"><label>Proveedor</label><input id="c-pr" placeholder="Nombre del proveedor"></div>
+        <div class="fr"><label>Artículo</label><select id="c-a" onchange="autoC()"><option value="">-- Elegir --</option></select></div>
+      </div>
+      <div class="g3">
+        <div class="fr"><label>Cantidad</label><input id="c-q" type="number" placeholder="0"></div>
+        <div class="fr"><label>Costo unitario ($)</label><input id="c-cu" type="number" placeholder="0.00"></div>
+        <div class="fr"><label>Forma de pago</label>
+          <select id="c-fp" onchange="toggleCheque()">
+            <option value="efectivo">Efectivo</option>
+            <option value="transferencia">Transferencia</option>
+            <option value="cheque_propio">Cheque propio</option>
+            <option value="cheque_diferido">Cheque diferido (otro mes)</option>
+            <option value="cuenta">A cuenta</option>
+          </select>
+        </div>
+      </div>
+      <div id="bloque-cheque" style="display:none;background:var(--amber-l);border:1px solid var(--amber);border-radius:var(--r);padding:12px;margin-bottom:12px">
+        <div style="font-size:12px;font-weight:600;color:var(--amber);margin-bottom:10px;text-transform:uppercase;letter-spacing:.05em">⚠ Datos del cheque diferido</div>
+        <div class="g3">
+          <div class="fr"><label>N° de cheque</label><input id="c-nch" placeholder="Ej: 12345678"></div>
+          <div class="fr"><label>Banco</label><input id="c-banco" placeholder="Ej: Galicia, Nacion..."></div>
+          <div class="fr"><label>Fecha de vencimiento</label><input id="c-venc" type="date"></div>
+        </div>
+        <div class="fr"><label>Observaciones</label><input id="c-obs" placeholder="Ej: cheque de tercero, endosado..."></div>
+      </div>
+      <div style="display:flex;gap:8px;margin-bottom:4px">
+        <button class="btn btn-p" style="flex:1" onclick="guardarCompra()">Registrar compra</button>
+        <button class="btn" onclick="cerrarFC()">Cancelar</button>
+      </div>
+    </div>
+    <!-- Alertas de cheques -->
+    <div class="card" id="alertas-cheques" style="display:none;border-color:var(--amber);margin-bottom:14px">
+      <div class="ct" style="color:var(--amber)">⚠ Cheques próximos a vencer</div>
+      <div id="lista-cheques"></div>
+    </div>
     <div id="compras-hist-table"></div>
   </div>
 
@@ -588,49 +689,6 @@ function rOptStock(){
 
 </div><!-- /s-stock unificado -->
 
-
-      <div class="sec" id="s-compras" style="display:none">
-        <div class="fb" style="margin-bottom:14px"><div></div><button class="btn btn-p" onclick="abrirFC()">+ Compra</button></div>
-        <div class="card" id="fc" style="display:none;margin-bottom:14px">
-          <div class="ct">Registrar compra</div>
-          <div class="g3">
-            <div class="fr"><label>Fecha</label><input id="c-f" type="date"></div>
-            <div class="fr"><label>Proveedor</label><input id="c-pr" placeholder="Nombre del proveedor"></div>
-            <div class="fr"><label>Artículo</label><select id="c-a" onchange="autoC()"><option value="">-- Elegir --</option></select></div>
-          </div>
-          <div class="g3">
-            <div class="fr"><label>Cantidad</label><input id="c-q" type="number" placeholder="0"></div>
-            <div class="fr"><label>Costo unitario ($)</label><input id="c-cu" type="number" placeholder="0.00"></div>
-            <div class="fr"><label>Forma de pago</label>
-              <select id="c-fp" onchange="toggleCheque()">
-                <option value="efectivo">Efectivo</option>
-                <option value="transferencia">Transferencia</option>
-                <option value="cheque_propio">Cheque propio</option>
-                <option value="cheque_diferido">Cheque diferido (otro mes)</option>
-                <option value="cuenta">A cuenta</option>
-              </select>
-            </div>
-          </div>
-          <div id="bloque-cheque" style="display:none;background:var(--amber-l);border:1px solid var(--amber);border-radius:var(--r);padding:12px;margin-bottom:12px">
-            <div style="font-size:12px;font-weight:600;color:var(--amber);margin-bottom:10px;text-transform:uppercase;letter-spacing:.05em">⚠ Datos del cheque diferido</div>
-            <div class="g3">
-              <div class="fr"><label>N° de cheque</label><input id="c-nch" placeholder="Ej: 12345678"></div>
-              <div class="fr"><label>Banco</label><input id="c-banco" placeholder="Ej: Galicia, Nacion..."></div>
-              <div class="fr"><label>Fecha de vencimiento</label><input id="c-venc" type="date"></div>
-            </div>
-            <div class="fr"><label>Observaciones</label><input id="c-obs" placeholder="Ej: cheque de tercero, endosado..."></div>
-          </div>
-          <div style="display:flex;gap:8px;margin-bottom:4px">
-            <button class="btn btn-p" style="flex:1" onclick="guardarCompra()">Registrar compra</button>
-            <button class="btn" onclick="cerrarFC()">Cancelar</button>
-          </div>
-        </div>
-        <div class="card" id="alertas-cheques" style="display:none;border-color:var(--amber);margin-bottom:14px">
-          <div class="ct" style="color:var(--amber)">⚠ Cheques próximos a vencer</div>
-          <div id="lista-cheques"></div>
-        </div>
-        <div class="tw"><table><thead><tr><th>Fecha</th><th>Artículo</th><th>Proveedor</th><th>Cant.</th><th>Costo u.</th><th>Total</th><th>Pago</th><th>Vence</th></tr></thead><tbody id="t-comp"></tbody></table></div>
-      </div>
 
       <!-- VENTAS -->
       <div class="sec" id="s-ventas">
@@ -814,10 +872,15 @@ function rOptStock(){
 
 <script>
 const CFG_KEY='merceria_cfg_v3';
-const MARGEN=1.21;
+const MARGEN=2.21;
 const HOY=new Date();
 const FECHA=HOY.toISOString().split('T')[0];
 let API_URL='';
+let API_TOKEN='';
+// Metas configurables (Fix: no hardcodeadas)
+let META_DIA=200000;
+let META_MES=4400000;
+let _lastLoad=0;
 let arts=[],ventas=[],items=[],compras=[],gastos=[];
 let carrito=[];
 let editArt=null;
@@ -826,10 +889,14 @@ const TITULOS={dashboard:'Inicio',stock:'Stock & Compras',compras:'Compras',vent
 // ── INIT ────────────────────────────────────────────────────
 window.addEventListener('load',()=>{
   document.getElementById('pdate').textContent=HOY.toLocaleDateString('es-AR',{weekday:'long',day:'numeric',month:'long',year:'numeric'});
-  API_URL='https://script.google.com/macros/s/AKfycbxX6oemb4hre9sUwH2V828w3E9X1PlV-2gN-vQnIqSkMZ9ZTTdg5LTnlwUfXx6wkF6DHQ/exec';
-  localStorage.setItem(CFG_KEY,JSON.stringify({url:API_URL}));
-  mostrarApp();
-  cargarTodo();
+  const cfg=JSON.parse(localStorage.getItem(CFG_KEY)||'{}');
+  if(cfg.url){
+    API_URL=cfg.url;
+    mostrarApp();
+    cargarTodo();
+  } else {
+    document.getElementById('setup').style.display='flex';
+  }
 });
 
 function modoVenta(modo){
@@ -863,6 +930,7 @@ function cargarDemoLocal(){
     {id:'5',nombre:'Encaje blanco x metro',categoria:'Encajes',costo:150,precio:331.50,stock:45,min_stock:10,unidad:'metro',codigo:'ENC-001'},
     {id:'6',nombre:'Elastico blanco 2cm x metro',categoria:'Elasticos',costo:90,precio:198.90,stock:2,min_stock:8,unidad:'metro',codigo:'ELA-001'},
     {id:'7',nombre:'Cierre nylon 20cm',categoria:'Cierres',costo:120,precio:265.20,stock:30,min_stock:6,unidad:'unidad',codigo:'CIE-001'},
+    // Nota: precios demo heredados; en producción se calculan con MARGEN=2.21
   ];
   gastos=[
     {id:'g1',tipo:'Alquiler',descripcion:'Local comercial',monto:35000,frecuencia:'mensual',fecha:'2026-01-01'},
@@ -877,6 +945,8 @@ function cargarDemoLocal(){
 function conectar(){
   const url=document.getElementById('cfg-url').value.trim();
   if(!url||!url.includes('script.google.com')){alert('La URL no parece ser de Google Apps Script');return;}
+  const gkey=document.getElementById('cfg-gemini-key').value.trim();
+  if(gkey) localStorage.setItem('gemini_key',btoa(gkey));
   API_URL=url;
   localStorage.setItem(CFG_KEY,JSON.stringify({url}));
   mostrarApp();
@@ -895,26 +965,20 @@ function apiScript(url){
     const script=document.createElement('script');
     const timer=setTimeout(()=>{
       delete window[cbName];
-      if(document.body.contains(script))document.body.removeChild(script);
+      document.body.removeChild(script);
       reject(new Error('Timeout'));
-    },20000);
+    },15000);
     window[cbName]=function(data){
       clearTimeout(timer);
       delete window[cbName];
-      if(document.body.contains(script))document.body.removeChild(script);
+      document.body.removeChild(script);
       resolve(data);
     };
     script.src=url+(url.includes('?')?'&':'?')+'callback='+cbName;
-    script.onerror=function(){
+    script.onerror=()=>{
       clearTimeout(timer);
       delete window[cbName];
-      if(document.body.contains(script))document.body.removeChild(script);
-      // Fallback: intentar con fetch directo
-      fetch(url.split('?')[0],{
-        method:'POST',
-        headers:{'Content-Type':'application/json'},
-        body:JSON.stringify(Object.fromEntries(new URLSearchParams(url.split('?')[1]||'')))
-      }).then(r=>r.json()).then(resolve).catch(()=>reject(new Error('Sin conexion')));
+      reject(new Error('Script error'));
     };
     document.body.appendChild(script);
   });
@@ -924,39 +988,70 @@ async function api(action,data={}){
   setSinc('spin','Guardando...');
   try{
     const params=new URLSearchParams({action,data:JSON.stringify(data)});
-    const json=await apiScript(API_URL+'?'+params);
+    if(API_TOKEN) params.append('token',API_TOKEN);
+    const json=await apiScript(`${API_URL}?${params}`);
     if(!json.ok)throw new Error(json.error||'Error');
     setSinc('ok','Sincronizado');
     return json.data;
   }catch(e){
-    setSinc('err','Sin conexion');
+    setSinc('err','Error de conexion');
     console.error('[api]',action,e);
     throw e;
   }
 }
 
 function normFecha(f){
-  if(!f)return'';f=String(f).trim();
+  if(!f)return'';
+  f=String(f).trim();
+  // Formato ISO con hora (viene de Google Sheets como fecha nativa): 2026-01-02T03:00:00.000Z
+  if(/^\d{4}-\d{2}-\d{2}T/.test(f))return f.substring(0,10);
+  // Ya está en formato correcto
   if(/^\d{4}-\d{2}-\d{2}$/.test(f))return f;
+  // Formato dd/mm/yyyy o d/m/yyyy (ventas históricas manuales)
   const p=f.split('/');
   if(p.length===3){const d=p[0].padStart(2,'0'),m=p[1].padStart(2,'0'),y=p[2].length===2?'20'+p[2]:p[2];return y+'-'+m+'-'+d;}
   return f;
 }
-async function cargarTodo(){
+async function cargarTodo(forzar=false){
+  if(!forzar&&Date.now()-_lastLoad<30000)return;
   setSinc('spin','Cargando...');
   try{
     const r=await api('getAll');
+    _lastLoad=Date.now();
     arts=r.articulos||[];
     ventas=(r.ventas||[]).map(v=>({...v,fecha:normFecha(v.fecha),total:+v.total,costo:+v.costo,ganancia:+v.ganancia}));
     items=r.venta_items||[];
     compras=r.compras||[];
     gastos=r.gastos||[];
+    // Cargar metas configurables
+    const cfg=JSON.parse(localStorage.getItem(CFG_KEY)||'{}');
+    if(cfg.meta_dia) META_DIA=cfg.meta_dia;
+    if(cfg.meta_mes) META_MES=cfg.meta_mes;
     // Asociar items a ventas
     ventas.forEach(v=>{v.items=items.filter(i=>String(i.venta_id)===String(v.id));});
     setSinc('ok','Sincronizado');
     renderActual();
     updateNB();
-  }catch(e){setSinc('err','Sin conexion');}
+  }catch(e){
+    setSinc('err','Sin conexion');
+    console.error('[cargarTodo]',e);
+    if(!arts.length){
+      const tb=document.getElementById('t-stock');
+      if(tb) tb.innerHTML='<tr><td colspan="7" style="text-align:center;color:var(--red);padding:20px">Error al cargar datos. Verificá la conexión y recargá la página.</td></tr>';
+    }
+  }
+}
+
+// ── MÉTRICAS CENTRALIZADAS (Fix: elimina cálculos duplicados en rDash/rInf/rEstrategia)
+function sum(arr,key){return arr.reduce((s,v)=>s+(+v[key]||0),0);}
+function calcMetrics(){
+  const vH=ventas.filter(v=>v.fecha===FECHA);
+  const vM=ventas.filter(v=>{const d=new Date(v.fecha+'T12:00:00');return d.getMonth()===HOY.getMonth()&&d.getFullYear()===HOY.getFullYear();});
+  const gfm=gastos.filter(g=>(g.frecuencia||'mensual')==='mensual').reduce((s,g)=>s+(+g.monto),0);
+  const totalDia=sum(vH,'total');
+  const totalMes=sum(vM,'total');
+  const costMes=sum(vM,'costo');
+  return{vH,vM,gfm,totalDia,totalMes,costMes,gnetaMes:totalMes-costMes-gfm};
 }
 
 function setSinc(st,txt){
@@ -979,9 +1074,10 @@ function ir(name){
   sec=name;
   renderActual();
 }
+let activeStockTab='articulos';
 function renderActual(){
   if(sec==='dashboard')rDash();
-  if(sec==='stock'){rStock();switchTab('articulos');}
+  if(sec==='stock'){rStock();switchTab(activeStockTab);}
   if(sec==='compras'){ir('stock');setTimeout(()=>switchTab('compras-hist'),100);return;}
   if(sec==='ventas'){rVH();updSel();}
   if(sec==='gastos')rGas();
@@ -997,12 +1093,11 @@ function updateNB(){const n=arts.filter(a=>a.stock<=ms(a)).length;const b=docume
 
 // ── DASHBOARD ────────────────────────────────────────────────
 function rDash(){
-  const vH=ventas.filter(v=>v.fecha===FECHA);
-  const vM=ventas.filter(v=>{const d=new Date(v.fecha+'T12:00:00');return d.getMonth()===HOY.getMonth()&&d.getFullYear()===HOY.getFullYear();});
-  document.getElementById('d-vh').textContent=fp(vH.reduce((s,v)=>s+v.total,0));
-  document.getElementById('d-gh').textContent=fp(vH.reduce((s,v)=>s+v.ganancia,0));
-  document.getElementById('d-vm').textContent=fp(vM.reduce((s,v)=>s+v.total,0));
-  document.getElementById('d-gm').textContent=fp(vM.reduce((s,v)=>s+v.ganancia,0));
+  const{vH,vM,gfm,totalDia,totalMes,costMes,gnetaMes}=calcMetrics();
+  document.getElementById('d-vh').textContent=fp(totalDia);
+  document.getElementById('d-gh').textContent=fp(sum(vH,'ganancia'));
+  document.getElementById('d-vm').textContent=fp(totalMes);
+  document.getElementById('d-gm').textContent=fp(totalMes-costMes);
   // Cheques proximos
   const hoy2=new Date(FECHA);
   const chqProx=compras.filter(c=>{
@@ -1023,7 +1118,7 @@ function rDash(){
       chqEl.style.display='block';
       document.getElementById('d-cheques-list').innerHTML=chqProx.map(c=>{
         const dv=new Date(c.cheque_vence+'T12:00:00');
-        const diff=Math.ceil((dv-hoyD)/(864e5));
+        const diff=Math.ceil((dv-hoy2)/(864e5));
         const cls=diff<0?'br':diff<=2?'br':'ba';
         const lbl=diff<0?'Vencido':diff===0?'Hoy':'En '+diff+'d';
         return`<div style="display:flex;justify-content:space-between;padding:5px 0;border-bottom:1px solid var(--brd);font-size:13px"><span>${c.proveedor} — ${c.nombre_articulo}</span><div><span class="bdg ${cls}" style="margin-right:6px">${lbl}</span><strong>${fp(c.total)}</strong></div></div>`;
@@ -1117,6 +1212,7 @@ async function guardarCompra(){
   if(API_URL){
     await api('saveCompra',compra);
     cerrarFC();await cargarTodo();
+    switchTab('compras-hist');
   } else {
     compra.id='c'+Date.now();
     compras.unshift(compra);
@@ -1125,28 +1221,9 @@ async function guardarCompra(){
     a.costo=cu;
     if(!a.precio||a.precio===0)a.precio=+(cu*MARGEN).toFixed(2);
   }
-  cerrarFC();rComp();rStock();rAlertasCheques();
+  cerrarFC();rCompHist();rStock();rAlertasCheques();switchTab('compras-hist');
 }
-function rComp(){
-  const tb=document.getElementById('t-comp');
-  if(!compras.length){tb.innerHTML='<tr><td colspan="8" class="empty">Sin compras</td></tr>';return;}
-  const hoy=new Date(FECHA);
-  tb.innerHTML=[...compras].slice(0,60).map(c=>{
-    const esCheque=c.forma_pago==='cheque_diferido';
-    let vencBadge='';
-    if(esCheque&&c.cheque_vence){
-      const dv=new Date(c.cheque_vence+'T12:00:00');
-      const diff=Math.ceil((dv-hoy)/(1000*60*60*24));
-      const cls=diff<0?'br':diff<=7?'ba':'bg';
-      const lbl=diff<0?'Vencido':diff===0?'Hoy vence':diff<=7?diff+'d':'OK';
-      vencBadge='<span class="bdg '+cls+'">'+lbl+'</span>';
-    }
-    const fpLabel={efectivo:'Efectivo',transferencia:'Transfer.',cheque_propio:'Cheque propio',cheque_diferido:'Cheque dif.',cuenta:'A cuenta'}[c.forma_pago||'efectivo']||c.forma_pago||'-';
-    const fpCls=esCheque?'ba':'bgr';
-    return '<tr class="'+(esCheque&&c.cheque_vence&&new Date(c.cheque_vence+'T12:00:00')<hoy?'trw':'')+'"><td>'+c.fecha+'</td><td>'+c.nombre_articulo+'</td><td>'+c.proveedor+'</td><td>'+c.cantidad+'</td><td>'+fp(c.costo_unitario)+'</td><td><strong>'+fp(c.total)+'</strong></td><td><span class="bdg '+fpCls+'">'+fpLabel+'</span></td><td>'+(esCheque?'<div style="font-size:11px;color:var(--txt2)">'+c.cheque_vence+'</div>'+vencBadge:'-')+'</td></tr>';
-  }).join('');
-  rAlertasCheques();
-}
+function rComp(){rCompHist();}  // compatibilidad — redirige al nuevo historial
 function rAlertasCheques(){
   const hoy=new Date(FECHA);
   const proximos=compras.filter(c=>{
@@ -1181,7 +1258,15 @@ function selArt(){
   const a=arts.find(x=>String(x.id)===document.getElementById('v-a').value);
   if(!a){document.getElementById('v-pl').textContent='-';return;}
   const esFrac=a.fraccionado==='si';
-  document.getElementById('v-pl').textContent=fp(a.precio)+' / '+a.unidad;
+  const factor=parseFloat(a.factor)||1;
+  // Precio por unidad de venta: si es fraccionado, precio por metro/unidad = precio_pieza / factor
+  const precioUnit=esFrac?+(a.precio/factor).toFixed(2):a.precio;
+  const costoUnit=esFrac?+(a.costo/factor).toFixed(2):a.costo;
+  // Guardar en el elemento para usarlo en addC
+  const sel=document.getElementById('v-a');
+  sel.dataset.precioUnit=precioUnit;
+  sel.dataset.costoUnit=costoUnit;
+  document.getElementById('v-pl').textContent=fp(precioUnit)+' / '+a.unidad+(esFrac?' (fraccionado de '+a.unidad_compra+')':'');
   const qi=document.getElementById('v-q');
   qi.value=esFrac?0.5:1;
   qi.step=esFrac?0.1:1;
@@ -1201,14 +1286,17 @@ function addC(){
     const precio=parseFloat(document.getElementById('v-precio-libre').value)||0;
     if(!desc){alert('Escribí una descripción');return;}
     if(!precio){alert('Ingresá el precio');return;}
-    carrito.push({id:'libre_'+Date.now(),nombre:desc,precio,costo:+(precio/2.21).toFixed(2),cant:qty,libre:true});
+    carrito.push({id:'libre_'+Date.now(),nombre:desc,precio,costo:+(precio/MARGEN).toFixed(2),cant:qty,libre:true});
   } else {
     const id=document.getElementById('v-a').value;const a=arts.find(x=>String(x.id)===id);
     if(!a){alert('Elegí un artículo');return;}
     if(qty>a.stock){alert(`Solo hay ${a.stock} ${a.unidad} en stock`);return;}
+    const sel=document.getElementById('v-a');
+    const precioUnit=parseFloat(sel.dataset.precioUnit)||a.precio;
+    const costoUnit=parseFloat(sel.dataset.costoUnit)||a.costo;
     const ex=carrito.find(x=>x.id===id);
     if(ex){if(ex.cant+qty>a.stock){alert('Stock insuficiente');return;}ex.cant+=qty;}
-    else carrito.push({id,nombre:a.nombre,precio:a.precio,costo:a.costo,cant:qty});
+    else carrito.push({id,nombre:a.nombre,precio:precioUnit,costo:costoUnit,cant:qty});
   }
   rCarrito();
 }
@@ -1261,10 +1349,10 @@ function vFilt(){
 }
 function rInf(){
   const vf=vFilt();
-  const tv=vf.reduce((s,v)=>s+v.total,0);
-  const tc=vf.reduce((s,v)=>s+v.costo,0);
+  const{gfm}=calcMetrics();
+  const tv=sum(vf,'total');
+  const tc=sum(vf,'costo');
   const gb=tv-tc;
-  const gfm=gastos.filter(g=>(g.frecuencia||'mensual')==='mensual').reduce((s,g)=>s+(+g.monto),0);
   const gn=gb-gfm;
   const mrg=tv>0?(gb/tv*100).toFixed(1):0;
   document.getElementById('er').innerHTML=`<div style="display:grid;grid-template-columns:1fr 1fr;gap:18px"><div><div style="margin-bottom:10px"><div class="tm" style="font-size:12px">+ Ingresos por ventas</div><div style="font-size:20px;font-weight:600;color:var(--blue)">${fp(tv)}</div></div><div style="margin-bottom:10px"><div class="tm" style="font-size:12px">− Costo de mercaderia</div><div style="font-size:20px;font-weight:600;color:var(--red)">${fp(tc)}</div></div><div class="div"></div><div style="margin-bottom:10px"><div class="tm" style="font-size:12px">= Ganancia bruta</div><div style="font-size:20px;font-weight:600;color:var(--green)">${fp(gb)}</div></div><div style="margin-bottom:10px"><div class="tm" style="font-size:12px">− Gastos fijos</div><div style="font-size:20px;font-weight:600;color:var(--red)">${fp(gfm)}</div></div><div class="div"></div><div><div class="tm" style="font-size:12px">= Ganancia neta</div><div style="font-size:28px;font-weight:600;color:${gn>=0?'var(--green)':'var(--red)'}">${fp(gn)}</div></div></div><div><div class="met" style="margin-bottom:8px"><div class="ml">Margen bruto</div><div class="mv gr">${mrg}%</div></div><div class="met" style="margin-bottom:8px"><div class="ml">Ventas realizadas</div><div class="mv bl">${vf.length}</div></div><div class="met"><div class="ml">Ticket promedio</div><div class="mv">${vf.length?fp(tv/vf.length):'$0'}</div></div></div></div>`;
@@ -1282,28 +1370,18 @@ function rInf(){
 
 // ── OPTIMIZAR ────────────────────────────────────────────────
 function rEstrategia(){
-  const HOY2=new Date();
-  const FECHA2=HOY2.toISOString().split('T')[0];
-  const vHoy=ventas.filter(v=>v.fecha===FECHA2);
-  const vMes=ventas.filter(v=>{const d=new Date(v.fecha+'T12:00:00');return d.getMonth()===HOY2.getMonth()&&d.getFullYear()===HOY2.getFullYear();});
-  const totalDia=vHoy.reduce((s,v)=>s+v.total,0);
-  const totalMes=vMes.reduce((s,v)=>s+v.total,0);
-  const costMes=vMes.reduce((s,v)=>s+v.costo,0);
-  const gfm=gastos.filter(g=>(g.frecuencia||'mensual')==='mensual').reduce((s,g)=>s+(+g.monto),0);
-  const gnetaMes=totalMes-costMes-gfm;
+  const{vH,vM,gfm,totalDia,totalMes,costMes,gnetaMes}=calcMetrics();
 
   // KPI venta dia
-  const metaDia=200000;
-  const pctDia=Math.min(100,(totalDia/metaDia*100)).toFixed(0);
+  const pctDia=Math.min(100,(totalDia/META_DIA*100)).toFixed(0);
   document.getElementById('kpi-vdia').textContent=fp(totalDia);
-  document.getElementById('kpi-vdia').style.color=totalDia>=metaDia?'var(--green)':'var(--red)';
+  document.getElementById('kpi-vdia').style.color=totalDia>=META_DIA?'var(--green)':'var(--red)';
   document.getElementById('kpi-vdia-bar').style.width=pctDia+'%';
-  document.getElementById('kpi-vdia-bar').style.background=totalDia>=metaDia?'var(--green)':'var(--amber)';
+  document.getElementById('kpi-vdia-bar').style.background=totalDia>=META_DIA?'var(--green)':'var(--amber)';
   document.getElementById('kpi-vdia-pct').textContent=pctDia+'%';
 
   // KPI venta mes
-  const metaMes=4400000;
-  const pctMes=Math.min(100,(totalMes/metaMes*100)).toFixed(0);
+  const pctMes=Math.min(100,(totalMes/META_MES*100)).toFixed(0);
   document.getElementById('kpi-vmes').textContent=fp(totalMes);
   document.getElementById('kpi-vmes-bar').style.width=pctMes+'%';
   document.getElementById('kpi-vmes-pct').textContent=pctMes+'%';
@@ -1315,15 +1393,15 @@ function rEstrategia(){
   document.getElementById('kpi-gnet-lbl').style.color=gnetaMes>=0?'var(--green)':'var(--red)';
 
   // Dias ok
-  const diasOk=vMes.filter(v=>v.total>=200000).length;
-  const dias300=vMes.filter(v=>v.total>=300000).length;
+  const diasOk=vM.filter(v=>v.total>=META_DIA).length;
+  const dias300=vM.filter(v=>v.total>=(META_DIA*1.5)).length;
   document.getElementById('kpi-dias-ok').textContent=diasOk;
   document.getElementById('kpi-dias-lbl').textContent=diasOk===0?'Aun no hay dias con meta cumplida':diasOk===1?'1 dia supero la meta':'Muy bien, seguir asi!';
   document.getElementById('kpi-dias-lbl').style.color=diasOk>0?'var(--green)':'var(--txt2)';
   document.getElementById('kpi-dias-300').textContent=dias300;
 
   // Cheques proximos
-  const hoyD=new Date(FECHA2);
+  const hoyD=new Date(FECHA);
   const chqProx=compras.filter(c=>{
     if(c.forma_pago!=='cheque_diferido'||!c.cheque_vence)return false;
     const dv=new Date(c.cheque_vence+'T12:00:00');
@@ -1340,8 +1418,8 @@ function rEstrategia(){
 
   // Objetivos checklist
   const objs1=[
-    {txt:'$200.000/dia de venta minima',ok:diasOk>0},
-    {txt:'Meta mensual $4.400.000',ok:totalMes>=4400000},
+    {txt:'$'+fp(META_DIA)+'/dia de venta minima',ok:diasOk>0},
+    {txt:'Meta mensual '+fp(META_MES),ok:totalMes>=META_MES},
     {txt:'Ganancia neta positiva',ok:gnetaMes>0},
     {txt:'Gastos < 12% de ventas',ok:totalMes>0&&(gfm/totalMes)<0.12},
     {txt:'Stock cargado en el sistema',ok:arts.length>3},
@@ -1378,6 +1456,37 @@ function rOpt(){
 </script>
 
 <!-- MODAL SOPORTE -->
+<div id="modal-gemini" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,0.6);z-index:500;align-items:center;justify-content:center;padding:20px">
+  <div style="background:#fff;border-radius:16px;padding:28px;max-width:420px;width:100%;box-shadow:0 20px 60px rgba(0,0,0,0.3)">
+    <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:16px">
+      <div style="font-size:18px;font-weight:600">🤖 API Key de Gemini</div>
+      <button onclick="document.getElementById('modal-gemini').style.display='none'" style="border:none;background:none;font-size:20px;cursor:pointer;color:#9b9894">✕</button>
+    </div>
+    <p style="font-size:13px;color:#6b6863;margin-bottom:16px;line-height:1.6">
+      Necesitás una API Key gratuita de Google para leer facturas con IA.<br>
+      Obtené la tuya en <a href="https://aistudio.google.com/apikey" target="_blank" style="color:var(--green)">aistudio.google.com/apikey</a>
+    </p>
+    <div style="margin-bottom:16px">
+      <label style="font-size:13px;font-weight:500;display:block;margin-bottom:6px">API Key de Gemini <small style="color:var(--txt2);font-weight:400">(gratis en <a href="https://aistudio.google.com/apikey" target="_blank" style="color:var(--green)">aistudio.google.com</a>)</small></label>
+      <input id="gemini-key-input" type="password" placeholder="AIzaSy..." style="width:100%;padding:10px 12px;border:1px solid #d0cec8;border-radius:10px;font-size:13px;font-family:'DM Mono',monospace;background:#f9f8f5">
+    </div>
+    <div style="display:grid;grid-template-columns:1fr 1fr;gap:10px;margin-bottom:16px">
+      <div>
+        <label style="font-size:13px;font-weight:500;display:block;margin-bottom:6px">Meta diaria ($)</label>
+        <input id="cfg-meta-dia" type="number" placeholder="200000" style="width:100%;padding:9px 12px;border:1px solid #d0cec8;border-radius:10px;font-size:13px;background:#f9f8f5">
+      </div>
+      <div>
+        <label style="font-size:13px;font-weight:500;display:block;margin-bottom:6px">Meta mensual ($)</label>
+        <input id="cfg-meta-mes" type="number" placeholder="4400000" style="width:100%;padding:9px 12px;border:1px solid #d0cec8;border-radius:10px;font-size:13px;background:#f9f8f5">
+      </div>
+    </div>
+    <div style="display:flex;gap:8px">
+      <button onclick="guardarGeminiKey()" style="flex:1;padding:11px;border-radius:10px;border:none;background:#2d5a3d;color:#fff;font-size:14px;font-weight:500;cursor:pointer">Guardar</button>
+      <button onclick="document.getElementById('modal-gemini').style.display='none'" style="padding:11px 16px;border-radius:10px;border:1px solid #d0cec8;background:#fff;color:#6b6863;font-size:14px;cursor:pointer">Cancelar</button>
+    </div>
+  </div>
+</div>
+
 <div id="modal-soporte" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,0.6);z-index:500;align-items:center;justify-content:center;padding:20px">
   <div style="background:#fff;border-radius:16px;padding:28px;max-width:440px;width:100%;box-shadow:0 20px 60px rgba(0,0,0,0.3)">
     <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:6px">
@@ -1419,43 +1528,31 @@ function enviarSoporte(){
 </script>
 
 
-<div id="modal-soporte" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,0.55);z-index:500;align-items:center;justify-content:center;padding:20px">
-  <div style="background:#fff;border-radius:16px;padding:28px;max-width:440px;width:100%;box-shadow:0 20px 60px rgba(0,0,0,0.3)">
-    <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:6px">
-      <div style="font-size:18px;font-weight:600">Soporte tecnico</div>
-      <button onclick="cerrarSoporte()" style="border:none;background:none;font-size:22px;cursor:pointer;color:#9b9894;line-height:1;padding:4px">x</button>
-    </div>
-    <p style="font-size:13px;color:#6b6863;margin-bottom:18px;line-height:1.6">Completá el formulario y te respondemos a la brevedad. O escribi a <strong>climbup.vm@gmail.com</strong></p>
-    <div style="margin-bottom:10px">
-      <label style="font-size:13px;color:#6b6863;display:block;margin-bottom:4px;font-weight:500">Nombre</label>
-      <input id="sp-nom" placeholder="Tu nombre" style="width:100%;padding:9px 12px;border:1px solid #d0cec8;border-radius:10px;font-size:14px;font-family:inherit;background:#f9f8f5">
-    </div>
-    <div style="margin-bottom:10px">
-      <label style="font-size:13px;color:#6b6863;display:block;margin-bottom:4px;font-weight:500">Tipo de problema</label>
-      <select id="sp-tipo" style="width:100%;padding:9px 12px;border:1px solid #d0cec8;border-radius:10px;font-size:14px;font-family:inherit;background:#f9f8f5">
-        <option value="">Seleccionar...</option>
-        <option>No puedo conectarme</option>
-        <option>Los datos no se guardan</option>
-        <option>Error al registrar ventas</option>
-        <option>Error al registrar compras</option>
-        <option>El sistema no carga</option>
-        <option>Otro problema</option>
-      </select>
-    </div>
-    <div style="margin-bottom:16px">
-      <label style="font-size:13px;color:#6b6863;display:block;margin-bottom:4px;font-weight:500">Descripcion</label>
-      <textarea id="sp-desc" placeholder="Describí el problema..." style="width:100%;padding:9px 12px;border:1px solid #d0cec8;border-radius:10px;font-size:14px;font-family:inherit;background:#f9f8f5;height:90px;resize:vertical"></textarea>
-    </div>
-    <div style="display:flex;gap:8px">
-      <button onclick="enviarSoporte()" style="flex:1;padding:11px;border-radius:10px;border:none;background:#2d5a3d;color:#fff;font-size:14px;font-weight:500;cursor:pointer;font-family:inherit">Enviar email</button>
-      <button onclick="cerrarSoporte()" style="padding:11px 16px;border-radius:10px;border:1px solid #d0cec8;background:#fff;color:#6b6863;font-size:14px;cursor:pointer;font-family:inherit">Cancelar</button>
-    </div>
-    <div id="sp-ok" style="display:none;margin-top:12px;padding:10px 14px;background:#e8f0ea;border-radius:8px;font-size:13px;color:#2d5a3d;text-align:center">Se abrio tu cliente de email. Si no funciono, escribi a climbup.vm@gmail.com</div>
-  </div>
-</div>
 <script>
 function abrirSoporte(){document.getElementById('modal-soporte').style.display='flex';}
 function cerrarSoporte(){document.getElementById('modal-soporte').style.display='none';}
+
+function abrirConfigGemini(){
+  const raw=localStorage.getItem('gemini_key')||'';
+  document.getElementById('gemini-key-input').value=raw?atob(raw):'';
+  const cfg=JSON.parse(localStorage.getItem(CFG_KEY)||'{}');
+  document.getElementById('cfg-meta-dia').value=cfg.meta_dia||META_DIA;
+  document.getElementById('cfg-meta-mes').value=cfg.meta_mes||META_MES;
+  document.getElementById('modal-gemini').style.display='flex';
+}
+function guardarGeminiKey(){
+  const k=document.getElementById('gemini-key-input').value.trim();
+  if(k) localStorage.setItem('gemini_key',btoa(k));
+  // Guardar metas configurables
+  const cfg=JSON.parse(localStorage.getItem(CFG_KEY)||'{}');
+  const md=parseFloat(document.getElementById('cfg-meta-dia').value)||200000;
+  const mm=parseFloat(document.getElementById('cfg-meta-mes').value)||4400000;
+  cfg.meta_dia=md; cfg.meta_mes=mm;
+  META_DIA=md; META_MES=mm;
+  localStorage.setItem(CFG_KEY,JSON.stringify(cfg));
+  document.getElementById('modal-gemini').style.display='none';
+  alert('✅ Configuración guardada.');
+}
 
 function leerExcel(input){
   const file=input.files[0];if(!file)return;
@@ -1573,8 +1670,12 @@ async function importarExcel(){
 
   document.getElementById('excel-paso2').style.display='none';
   document.getElementById('excel-paso3').style.display='block';
-  document.getElementById('excel-res-titulo').textContent=importados+' articulos importados';
-  document.getElementById('excel-res-detalle').textContent=(omitidos>0?omitidos+' filas omitidas por falta de nombre. ':'')+' El stock fue actualizado.';
+  const tit=document.getElementById('excel-res-titulo');
+  const det=document.getElementById('excel-res-detalle');
+  tit.style.display='block';
+  tit.textContent=importados+' articulos importados';
+  det.style.display='block';
+  det.textContent=(omitidos>0?omitidos+' filas omitidas por falta de nombre. ':'')+' El stock fue actualizado.';
   rStock();updateNB();
 }
 
