@@ -402,7 +402,7 @@ function rOptStock(){
   <!-- TAB ARTÍCULOS -->
   <div id="panel-articulos">
     <div class="fb" style="margin-bottom:14px">
-          <div class="fl"><input id="buscar" placeholder="Buscar... (Enter para buscar)" style="max-width:230px" oninput="debouncedRStock()" onkeydown="if(event.key==='Enter'){clearTimeout(_stockTimer);rStock()}"><select id="fcat" onchange="rStock()" style="max-width:170px"><option value="">Todas</option><option>Hilos</option><option>Agujas</option><option>Botones</option><option>Encajes</option><option>Cintas</option><option>Telas</option><option>Elásticos</option><option>Cierres</option><option>Lanas</option><option>Accesorios</option></select></div>
+          <div class="fl"><input id="buscar" placeholder="Buscar... (Enter para buscar)" style="max-width:230px" oninput="debouncedRStock()" onkeydown="if(event.key==='Enter'||event.keyCode===13){event.preventDefault();clearTimeout(_stockTimer);rStock();this.blur();}"><select id="fcat" onchange="rStock()" style="max-width:170px"><option value="">Todas</option><option>Hilos</option><option>Agujas</option><option>Botones</option><option>Encajes</option><option>Cintas</option><option>Telas</option><option>Elásticos</option><option>Cierres</option><option>Lanas</option><option>Accesorios</option></select></div>
           <div class="fl">
 
             <button class="btn btn-p" onclick="abrirFS()">+ Artículo</button>
@@ -1505,16 +1505,31 @@ function rDash(){
     const d=new Date(e[0]+'T12:00:00');
     const diff=Math.ceil((d-hoyD)/(1000*60*60*24));
     return diff>=0&&diff<=5;
-  });
+  }).map(e=>({fecha:e[0],titulo:e[1],cobro:false}));
+  // Cobranzas de cuentas corrientes (vencidas y por vencer en 5 días)
+  const proxCobros=[];
+  if(typeof ccData!=='undefined'&&ccData.clientas&&ccData.movimientos){
+    ccData.clientas.forEach(cl=>{
+      ccData.movimientos.filter(m=>m.clienta_id===cl.id&&m.tipo==='deuda'&&m.vence&&!m.saldado).forEach(m=>{
+        const d=new Date(m.vence+'T12:00:00');
+        const diff=Math.ceil((d-hoyD)/(1000*60*60*24));
+        if(diff<=5){
+          proxCobros.push({fecha:m.vence,titulo:'💰 Cobrar a '+cl.nombre+' — '+fp(m.monto),cobro:true,vencido:diff<0});
+        }
+      });
+    });
+  }
+  const dashCalItems=[...proxCal,...proxCobros].sort((a,b)=>a.fecha.localeCompare(b.fecha));
   const dashCalEl=document.getElementById('dash-cal-alert');
   if(dashCalEl){
-    if(proxCal.length){
+    if(dashCalItems.length){
       dashCalEl.style.display='';
-      document.getElementById('dash-cal-items').innerHTML=proxCal.map(e=>{
-        const d=new Date(e[0]+'T12:00:00');
+      document.getElementById('dash-cal-items').innerHTML=dashCalItems.map(e=>{
+        const d=new Date(e.fecha+'T12:00:00');
         const diff=Math.ceil((d-hoyD)/(1000*60*60*24));
-        const label=diff===0?'¡Hoy!':diff===1?'Mañana':'En '+diff+' días';
-        return '<div style="display:flex;justify-content:space-between;align-items:center;padding:6px 0;border-bottom:1px solid #f0e8c0"><span style="font-size:13px;font-weight:600;color:#1a1a1a">'+e[1]+'</span><span style="font-size:11px;color:#b07020;font-weight:700">'+label+'</span></div>';
+        const label=e.vencido?'Vencido':diff===0?'¡Hoy!':diff===1?'Mañana':'En '+diff+' días';
+        const color=e.vencido?'#c0392b':'#b07020';
+        return '<div style="display:flex;justify-content:space-between;align-items:center;padding:6px 0;border-bottom:1px solid #f0e8c0"><span style="font-size:13px;font-weight:600;color:#1a1a1a">'+e.titulo+'</span><span style="font-size:11px;color:'+color+';font-weight:700">'+label+'</span></div>';
       }).join('');
     } else {
       dashCalEl.style.display='none';
@@ -1595,10 +1610,12 @@ function rStock(){
     _stockCache={};
     _lastStockLen=arts.length;
   }
-  const lista=arts.filter(a=>
-    (!q||((a.nombre||'').toLowerCase().includes(q))||((a.codigo||'').toLowerCase().includes(q)))
-    &&(!cat||a.categoria===cat)
-  );
+  const qTokens=q.split(/\s+/).filter(Boolean);
+  const lista=arts.filter(a=>{
+    const texto=((a.nombre||'')+' '+(a.codigo||'')+' '+(a.categoria||'')).toLowerCase();
+    return (!qTokens.length||qTokens.every(t=>texto.includes(t)))
+      &&(!cat||a.categoria===cat);
+  });
   if(!lista.length){tb.innerHTML='<tr><td colspan="7" class="empty">Sin articulos</td></tr>';return;}
   tb.innerHTML=lista.map(a=>{
     const key=a.id+'_'+a.stock+'_'+a.precio+'_'+a.costo;
